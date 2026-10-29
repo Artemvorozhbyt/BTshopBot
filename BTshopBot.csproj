@@ -8,6 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Google.Apis.Sheets.v4" Version="1.77.0.4309" />
     <PackageReference Include="Telegram.Bot" Version="22.10.3.3" />
   </ItemGroup>
 
