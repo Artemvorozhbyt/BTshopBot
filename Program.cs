@@ -23,7 +23,7 @@ using var cancellationTokenSource = new CancellationTokenSource();
 var clientForms = new ConcurrentDictionary<long, ClientForm>();
 var adminClientForms =
     new ConcurrentDictionary<long, AdminClientForm>();
-const long AdminTelegramId = 5841248869;
+const long AdminTelegramId = 1194842683;
 
 string spreadsheetId = "1X-M2lHAZBCtTfahu_54TsF0U8y7d0MS0qVV4hq0xbgc";
 
@@ -37,6 +37,23 @@ var googleSheetsService = new GoogleSheetsService(
     credentialsPath,
     spreadsheetId
 );
+
+string? brevoApiKey =
+    Environment.GetEnvironmentVariable("BTSHOP_BREVO_API_KEY");
+
+BrevoEmailService? brevoEmailService = null;
+
+if (string.IsNullOrWhiteSpace(brevoApiKey))
+{
+    Console.WriteLine("WARNING: Brevo API key not found.");
+}
+else
+{
+    brevoEmailService = new BrevoEmailService(
+        brevoApiKey,
+        "artvorozhbyt@gmail.com",
+        "BTshopBot");
+}
 
 bot.StartReceiving(
     HandleUpdateAsync,
@@ -61,6 +78,58 @@ async Task HandleUpdateAsync(
     long chatId = message.Chat.Id;
     string? messageText = message.Text?.Trim();
 
+    if (messageText == "/testemail")
+    {
+        if (message.From?.Id != AdminTelegramId)
+        {
+            await botClient.SendMessage(
+                chatId,
+                "⛔ У тебе немає доступу до цієї команди.",
+                cancellationToken: cancellationToken);
+
+            return;
+        }
+
+        if (brevoEmailService is null)
+        {
+            await botClient.SendMessage(
+                chatId,
+                "❌ Не знайдено Brevo API key. Перевір змінну середовища.",
+                cancellationToken: cancellationToken);
+
+            return;
+        }
+
+        try
+        {
+            await brevoEmailService.SendEmailAsync(
+                "artvorozhbyt@gmail.com",
+                "Тест BTshopBot — Brevo",
+                """
+            <h2>Привіт!</h2>
+            <p>Це тестовий лист від BTshopBot.</p>
+            <p>Якщо ти отримав цей лист, інтеграція з Brevo працює.</p>
+            """,
+                cancellationToken);
+
+            await botClient.SendMessage(
+                chatId,
+                "✅ Brevo прийняв тестовий лист. Перевір свою пошту.",
+                cancellationToken: cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Brevo error: {ex}");
+
+            await botClient.SendMessage(
+                chatId,
+                "❌ Не вдалося надіслати лист. Перевір консоль.",
+                cancellationToken: cancellationToken);
+        }
+
+        return;
+    }
+
     if (message.From is { } sender)
     {
         Console.WriteLine(
@@ -83,7 +152,7 @@ async Task HandleUpdateAsync(
         await botClient.SendMessage(
             chatId,
             "Потрібна допомога або щось незрозуміло? 😊\n\n" +
-            "Напиши Дімі — він допоможе розібратися з послугами BTshop та заповненням заявки.",
+            "Напиши Дмитру — він допоможе розібратися з послугами BTshop та заповненням заявки.",
             replyMarkup: new InlineKeyboardMarkup(
                 InlineKeyboardButton.WithUrl(
                     "💬 Написати Дмитру",
@@ -259,6 +328,7 @@ async Task HandleUpdateAsync(
                         instagram: adminForm.Instagram,
                         telegram: adminForm.Telegram,
                         phone: adminForm.Phone,
+                        email: "",
                         services: string.Join(", ", adminForm.SelectedServices),
                         businessDetails: adminForm.BusinessDetails,
                         productionDetails: adminForm.ProductionDetails,
@@ -479,145 +549,130 @@ async Task HandleUpdateAsync(
     if (!clientForms.TryGetValue(chatId, out var currentForm))
         return;
 
-    // Контакт можна прийняти лише від самого користувача.
+
     if (message.Contact is { } contact)
     {
-        if (message.From is null || contact.UserId != message.From.Id)
+        // Приймаємо лише власний контакт користувача.
+        if (contact.UserId != message.From?.Id)
         {
             await botClient.SendMessage(
                 chatId,
                 "Будь ласка, поділися саме своїм контактом.",
                 cancellationToken: cancellationToken);
+
             return;
         }
 
-        currentForm.Phone = contact.PhoneNumber;
-        currentForm.Telegram = message.From.Username is { } username ? $"@{username}" : "";
-
-
         if (currentForm.Step == FormStep.Telegram)
         {
+            // На цьому кроці зберігаємо лише Telegram username.
+            // Номер телефону запитаємо окремо.
+            currentForm.Telegram = message.From?.Username is { } username
+                ? $"@{username}"
+                : "";
+
             currentForm.Step = FormStep.Instagram;
-            await AskForFieldAsync(botClient, chatId, currentForm, FormStep.Instagram, cancellationToken);
+
+            await AskForFieldAsync(
+                botClient,
+                chatId,
+                currentForm,
+                FormStep.Instagram,
+                cancellationToken);
+
             return;
         }
 
         if (currentForm.Step == FormStep.Phone)
         {
-            currentForm.Step = FormStep.Completed;
-            await ShowSummaryAsync(botClient, chatId, currentForm, cancellationToken);
+            currentForm.Phone = contact.PhoneNumber;
+
+            await AdvanceFormAsync(
+                botClient,
+                chatId,
+                currentForm,
+                cancellationToken);
+
+            return;
         }
 
         return;
     }
+
 
     if (messageText is null)
         return;
 
     string answer = messageText;
-    if (currentForm.Step == FormStep.Services)
+
+    if (currentForm.Step == FormStep.Email)
     {
-        if (answer == "⏭ Пропустити")
-        {
-            currentForm.SelectedServices.Clear();
+        string email = answer.Trim();
 
-            await AdvanceFormAsync(
-                botClient,
-                chatId,
-                currentForm,
-                cancellationToken);
+        bool isValidEmail =
+            System.Text.RegularExpressions.Regex.IsMatch(
+                email,
+                @"^[^@\s]+@[^@\s]+\.[^@\s]+$");
 
-            return;
-        }
-
-        if (answer == "✅ Готово")
-        {
-            if (currentForm.SelectedServices.Count == 0)
-            {
-                await botClient.SendMessage(
-                    chatId,
-                    "Будь ласка, обери хоча б одну послугу або натисни «⏭ Пропустити».",
-                    cancellationToken: cancellationToken);
-
-                return;
-            }
-
-            await AdvanceFormAsync(
-                botClient,
-                chatId,
-                currentForm,
-                cancellationToken);
-
-            return;
-        }
-
-        if (answer == "📦 Повний пакет BTshop")
-        {
-            currentForm.SelectedServices.Clear();
-            currentForm.SelectedServices.Add("Повний пакет BTshop");
-        }
-        else if (answer == "🚢 Імпорт товарів")
-        {
-            currentForm.SelectedServices.Remove("Повний пакет BTshop");
-
-            if (!currentForm.SelectedServices.Remove("Імпорт товарів"))
-            {
-                currentForm.SelectedServices.Add("Імпорт товарів");
-            }
-        }
-        else if (answer == "🛒 Супровід e-commerce")
-        {
-            currentForm.SelectedServices.Remove("Повний пакет BTshop");
-
-            if (!currentForm.SelectedServices.Remove("Супровід e-commerce"))
-            {
-                currentForm.SelectedServices.Add("Супровід e-commerce");
-            }
-        }
-        else if (answer == "➕ Інша послуга")
-        {
-            currentForm.SelectedServices.Remove("Повний пакет BTshop");
-
-            if (!currentForm.SelectedServices.Remove("Інша послуга"))
-            {
-                currentForm.SelectedServices.Add("Інша послуга");
-            }
-        }
-        else
+        if (!isValidEmail)
         {
             await botClient.SendMessage(
                 chatId,
-                "Будь ласка, обери послугу за допомогою кнопок.",
+                "❌ Некоректна електронна пошта. Введи адресу у форматі name@example.com.",
                 cancellationToken: cancellationToken);
 
             return;
         }
 
-        string selectedServices = currentForm.SelectedServices.Count > 0
-            ? string.Join("\n", currentForm.SelectedServices.Select(s => $"• {s}"))
-            : "Поки нічого не вибрано.";
+        currentForm.Email = email;
 
-        await botClient.SendMessage(
+        await AdvanceFormAsync(
+            botClient,
             chatId,
-            $"Твій вибір:\n{selectedServices}\n\n" +
-            "Можеш вибрати ще послуги. Коли закінчиш, натисни «✅ Готово».",
-            replyMarkup: new ReplyKeyboardMarkup(new[]
-            {
-            new KeyboardButton[] { "📦 Повний пакет BTshop" },
-            new KeyboardButton[] { "🚢 Імпорт товарів" },
-            new KeyboardButton[] { "🛒 Супровід e-commerce" },
-            new KeyboardButton[] { "➕ Інша послуга" },
-            new KeyboardButton[] { "✅ Готово", "⏭ Пропустити" },
-            new KeyboardButton[] { "❓ Допомога" }
-            })
-            {
-                ResizeKeyboard = true,
-                IsPersistent = true
-            },
-            cancellationToken: cancellationToken);
+            currentForm,
+            cancellationToken);
 
         return;
     }
+
+    if (currentForm.Step == FormStep.Services)
+    {
+        if (answer is not (
+            "📦 Повний пакет BTshop"
+            or "🚢 Імпорт товарів"
+            or "🛒 Супровід e-commerce"
+            or "➕ Інша послуга"))
+        {
+            await botClient.SendMessage(
+                chatId,
+                "Будь ласка, обери одну з чотирьох послуг за допомогою кнопок.",
+                cancellationToken: cancellationToken);
+
+            return;
+        }
+
+        currentForm.SelectedServices.Clear();
+
+        string selectedService = answer switch
+        {
+            "📦 Повний пакет BTshop" => "Повний пакет BTshop",
+            "🚢 Імпорт товарів" => "Імпорт товарів",
+            "🛒 Супровід e-commerce" => "Супровід e-commerce",
+            "➕ Інша послуга" => "Інша послуга",
+            _ => throw new InvalidOperationException("Невідома послуга.")
+        };
+
+        currentForm.SelectedServices.Add(selectedService);
+
+        await AdvanceFormAsync(
+            botClient,
+            chatId,
+            currentForm,
+            cancellationToken);
+
+        return;
+    }
+
 
     if (answer == "/skip")
     {
@@ -730,6 +785,7 @@ async Task HandleUpdateAsync(
                 currentForm.Telegram,
                 currentForm.Instagram,
                 currentForm.Phone,
+
                 string.Join(", ", currentForm.SelectedServices),
                 currentForm.BusinessDetails,
                 currentForm.ProductionDetails
@@ -745,11 +801,13 @@ async Task HandleUpdateAsync(
             }
 
 
+
             try
             {
                 Console.WriteLine("DEBUG: User confirmed the application.");
                 Console.WriteLine("DEBUG: Sending application to Google Sheets...");
 
+                // 1. Зберігаємо заявку ОДИН раз
                 await googleSheetsService.AppendApplicationAsync(
                     currentForm.Name,
                     currentForm.Company,
@@ -757,6 +815,7 @@ async Task HandleUpdateAsync(
                     currentForm.Instagram,
                     currentForm.Telegram,
                     currentForm.Phone,
+                    currentForm.Email,
                     string.Join(", ", currentForm.SelectedServices),
                     currentForm.BusinessDetails,
                     currentForm.ProductionDetails,
@@ -764,6 +823,58 @@ async Task HandleUpdateAsync(
                 );
 
                 Console.WriteLine("DEBUG: Application successfully saved to Google Sheets.");
+
+                // 2. Лист клієнту
+                if (brevoEmailService is not null &&
+                    !string.IsNullOrWhiteSpace(currentForm.Email))
+                {
+                    try
+                    {
+                        await brevoEmailService.SendEmailAsync(
+                            currentForm.Email,
+                            "Дякуємо, що обрали BTshop! 🤝",
+                            BrevoEmailService.GetClientConfirmationHtml(),
+                            cancellationToken
+                        );
+
+                        Console.WriteLine("DEBUG: Client email sent.");
+                    }
+                    catch (Exception emailEx)
+                    {
+                        Console.WriteLine($"Помилка листа клієнту: {emailEx}");
+                    }
+                }
+
+        
+                if (brevoEmailService is not null)
+                {
+                    try
+                    {
+                        await brevoEmailService.SendEmailAsync(
+                            "artvorozhbyt@gmail.com",
+                            "🔔 Нова заявка — BT SHOP",
+                            BrevoEmailService.GetAdminNotificationHtml(
+                                name: currentForm.Name,
+                                company: currentForm.Company,
+                                industry: currentForm.Industry,
+                                instagram: currentForm.Instagram,
+                                telegram: currentForm.Telegram,
+                                phone: currentForm.Phone,
+                                email: currentForm.Email,
+                                services: string.Join(", ", currentForm.SelectedServices),
+                                businessDetails: currentForm.BusinessDetails,
+                                productionDetails: currentForm.ProductionDetails
+                            ),
+                            cancellationToken
+                        );
+
+                        Console.WriteLine("DEBUG: Admin notification email sent.");
+                    }
+                    catch (Exception emailEx)
+                    {
+                        Console.WriteLine($"Помилка листа адміністратору: {emailEx}");
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -779,10 +890,11 @@ async Task HandleUpdateAsync(
             }
 
 
+
             clientForms.TryRemove(chatId, out _);
             await botClient.SendMessage(
                 chatId,
-                "Дякуємо! 💚\n\nТвою заявку прийнято. Ми зв'яжемося з тобою найближчим часом!",
+                "Дякуємо! 💙\n\nТвою заявку прийнято. Ми зв'яжемося з тобою найближчим часом!",
                 replyMarkup: new ReplyKeyboardRemove(),
                 cancellationToken: cancellationToken);
             return;
@@ -799,6 +911,20 @@ async Task HandleUpdateAsync(
     {
         SetField(currentForm, currentForm.Step, "");
         await AdvanceFormAsync(botClient, chatId, currentForm, cancellationToken);
+        return;
+    }
+
+    if (currentForm.Step == FormStep.Telegram &&
+    answer == "🙅 Немає username")
+    {
+        currentForm.Telegram = "";
+
+        await AdvanceFormAsync(
+            botClient,
+            chatId,
+            currentForm,
+            cancellationToken);
+
         return;
     }
 
@@ -846,14 +972,15 @@ async Task AdvanceFormAsync(
             form.Step = FormStep.Instagram;
             break;
         case FormStep.Instagram:
-            form.Step = string.IsNullOrWhiteSpace(form.Phone) ? FormStep.Phone : FormStep.Completed;
-            if (form.Step == FormStep.Completed)
-            {
-                await ShowSummaryAsync(botClient, chatId, form, cancellationToken);
-                return;
-            }
+            form.Step = string.IsNullOrWhiteSpace(form.Phone)
+                ? FormStep.Phone
+                : FormStep.Email;
             break;
         case FormStep.Phone:
+            form.Step = FormStep.Email;
+            break;
+
+        case FormStep.Email:
             form.Step = FormStep.Completed;
             await ShowSummaryAsync(botClient, chatId, form, cancellationToken);
             return;
@@ -883,6 +1010,7 @@ async Task AskForFieldAsync(
         FormStep.Telegram => "Можеш поділитися своїм контактом кнопкою нижче або ввести Telegram вручну.",
         FormStep.Instagram => "Вкажи свій Instagram.",
         FormStep.Phone => "Вкажи номер телефону або поділися контактом кнопкою нижче.",
+        FormStep.Email => "📧 Вкажи свою електронну пошту (наприклад, name@example.com).",
         _ => "Введи відповідь."
     };
 
@@ -895,8 +1023,7 @@ async Task AskForFieldAsync(
             new KeyboardButton[] { "📦 Повний пакет BTshop" },
             new KeyboardButton[] { "🚢 Імпорт товарів" },
             new KeyboardButton[] { "🛒 Супровід e-commerce" },
-            new KeyboardButton[] { "➕ Інша послуга" },
-            new KeyboardButton[] { "✅ Готово", "⏭ Пропустити" }
+            new KeyboardButton[] { "➕ Інша послуга" }
         };
     }
 
@@ -914,12 +1041,27 @@ async Task AskForFieldAsync(
     };
     }
 
-    else if (field is FormStep.Telegram or FormStep.Phone)
+    else if (field == FormStep.Telegram)
     {
         buttons = new[]
         {
             new KeyboardButton[] { KeyboardButton.WithRequestContact("📲 Поділитися контактом") },
-            new KeyboardButton[] { "⏭ Пропустити" },
+            new KeyboardButton[] { "🙅 Немає username" },
+            new KeyboardButton[] { "❓ Допомога" }
+        };
+    }
+    else if (field == FormStep.Phone)
+    {
+        buttons = new[]
+        {
+            new KeyboardButton[] { KeyboardButton.WithRequestContact("📲 Поділитися контактом") },
+            new KeyboardButton[] { "❓ Допомога" }
+        };
+    }
+    else if (field == FormStep.Email)
+    {
+        buttons = new[]
+        {
             new KeyboardButton[] { "❓ Допомога" }
         };
     }
@@ -955,7 +1097,8 @@ async Task ShowSummaryAsync(
         $"Деталі виробництва: {Display(form.ProductionDetails)}\n" +
         $"Telegram: {Display(form.Telegram)}\n" +
         $"Instagram: {Display(form.Instagram)}\n" +
-        $"Телефон: {Display(form.Phone)}\n\n" +
+        $"Телефон: {Display(form.Phone)}\n" +
+        $"📧 E-mail: {Display(form.Email)}\n\n" +
         "Можеш підтвердити заявку або відредагувати дані.";
 
     await botClient.SendMessage(
@@ -995,6 +1138,7 @@ bool TryGetFieldFromButton(string answer, out FormStep field)
         "✈️ Telegram" => FormStep.Telegram,
         "📸 Instagram" => FormStep.Instagram,
         "📞 Телефон" => FormStep.Phone,
+        "📧 E-mail" => FormStep.Email,
         _ => FormStep.Completed
     };
 
@@ -1022,6 +1166,9 @@ void SetField(ClientForm form, FormStep field, string value)
             break;
         case FormStep.Phone:
             form.Phone = value;
+            break;
+        case FormStep.Email:
+            form.Email = value;
             break;
         case FormStep.BusinessDetails:
             form.BusinessDetails = value;
@@ -1064,6 +1211,7 @@ enum FormStep
     Telegram,
     Instagram,
     Phone,
+    Email,
     Completed
 }
 
@@ -1081,6 +1229,7 @@ class ClientForm
     public string Telegram { get; set; } = "";
     public string Instagram { get; set; } = "";
     public string Phone { get; set; } = "";
+    public string Email { get; set; } = "";
 }
 
 
