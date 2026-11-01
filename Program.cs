@@ -23,7 +23,27 @@ using var cancellationTokenSource = new CancellationTokenSource();
 var clientForms = new ConcurrentDictionary<long, ClientForm>();
 var adminClientForms =
     new ConcurrentDictionary<long, AdminClientForm>();
-const long AdminTelegramId = 1194842683;
+
+var adminModerationActions =
+    new ConcurrentDictionary<long, string>();
+
+const long AdminTelegramId = 5841248869;
+
+var blockedUsersService = new BlockedUsersService(
+    Path.Combine(
+        Directory.GetCurrentDirectory(),
+        "data",
+        "blocked-users.json"
+    )
+);
+
+var knownUsersService = new KnownUsersService(
+    Path.Combine(
+        Directory.GetCurrentDirectory(),
+        "data",
+        "known-users.json"
+    )
+);
 
 string spreadsheetId = "1X-M2lHAZBCtTfahu_54TsF0U8y7d0MS0qVV4hq0xbgc";
 
@@ -78,6 +98,50 @@ async Task HandleUpdateAsync(
     long chatId = message.Chat.Id;
     string? messageText = message.Text?.Trim();
 
+    if (message.From is { } blockedSender &&
+    blockedSender.Id != AdminTelegramId &&
+    await blockedUsersService.IsBlockedAsync(
+        blockedSender.Id,
+        cancellationToken))
+    {
+        Console.WriteLine($"Blocked user attempted access: {blockedSender.Id}");
+        return;
+    }
+
+    if (message.From is { } newUser &&
+        newUser.Id != AdminTelegramId)
+    {
+        try
+        {
+            bool isFirstVisit = await knownUsersService.TryRegisterAsync(
+                newUser.Id,
+                cancellationToken);
+
+            if (isFirstVisit)
+            {
+                string username = string.IsNullOrWhiteSpace(newUser.Username)
+                    ? "Не встановлено"
+                    : $"@{newUser.Username}";
+
+                string fullName = $"{newUser.FirstName} {newUser.LastName}".Trim();
+
+                await botClient.SendMessage(
+                    AdminTelegramId,
+                    "🔔 Новий користувач BTshopBot\n\n" +
+                    $"👤 Ім'я: {fullName}\n" +
+                    $"📱 Username: {username}\n" +
+                    $"🆔 Telegram ID: {newUser.Id}",
+                    cancellationToken: cancellationToken);
+
+                Console.WriteLine($"New user registered: {newUser.Id}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"New user notification error: {ex}");
+        }
+    }
+
     if (messageText == "/testemail")
     {
         if (message.From?.Id != AdminTelegramId)
@@ -100,34 +164,7 @@ async Task HandleUpdateAsync(
             return;
         }
 
-        try
-        {
-            await brevoEmailService.SendEmailAsync(
-                "artvorozhbyt@gmail.com",
-                "Тест BTshopBot — Brevo",
-                """
-            <h2>Привіт!</h2>
-            <p>Це тестовий лист від BTshopBot.</p>
-            <p>Якщо ти отримав цей лист, інтеграція з Brevo працює.</p>
-            """,
-                cancellationToken);
-
-            await botClient.SendMessage(
-                chatId,
-                "✅ Brevo прийняв тестовий лист. Перевір свою пошту.",
-                cancellationToken: cancellationToken);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Brevo error: {ex}");
-
-            await botClient.SendMessage(
-                chatId,
-                "❌ Не вдалося надіслати лист. Перевір консоль.",
-                cancellationToken: cancellationToken);
-        }
-
-        return;
+        return; 
     }
 
     if (message.From is { } sender)
@@ -151,12 +188,89 @@ async Task HandleUpdateAsync(
     {
         await botClient.SendMessage(
             chatId,
-            "Потрібна допомога або щось незрозуміло? 😊\n\n" +
-            "Напиши Дмитру — він допоможе розібратися з послугами BTshop та заповненням заявки.",
+            "Оберіть, яка саме допомога вам потрібна:",
+            replyMarkup: new ReplyKeyboardMarkup(new[]
+            {
+                new KeyboardButton[] { "🤖 Допомога з ботом" },
+                new KeyboardButton[] { "💼 Платна консультація" },
+                new KeyboardButton[] { "⬅️ Назад до меню" }
+            })
+            {
+                ResizeKeyboard = true
+            },
+            cancellationToken: cancellationToken);
+
+        return;
+    }
+
+    // Допомога з ботом
+    if (messageText == "🤖 Допомога з ботом")
+    {
+        await botClient.SendMessage(
+            chatId,
+            "🤖 Як користуватися BTshopBot?\n\n" +
+            "За допомогою бота ви можете залишити заявку на послуги BTshop.\n\n" +
+            "📋 Як заповнити заявку:\n\n" +
+            "1️⃣ Оберіть послугу, яка вас цікавить.\n\n" +
+            "2️⃣ Відповідайте на запитання бота: вкажіть своє ім'я, компанію, контакти та іншу необхідну інформацію.\n\n" +
+            "3️⃣ Якщо якесь поле не стосується вас або ви не хочете надавати інформацію, натисніть «Пропустити».\n\n" +
+            "4️⃣ Після заповнення перевірте свої дані. Якщо потрібно, ви зможете їх відредагувати.\n\n" +
+            "5️⃣ Підтвердіть заявку — після цього вона буде передана представникам BTshop.\n\n" +
+            "ℹ️ Важливо:\n" +
+            "• Заповнюйте інформацію уважно, щоб ми могли швидше зв'язатися з вами.\n" +
+            "• Не обов'язково заповнювати всі необов'язкові поля.\n\n" +
+            "Дякуємо, що обрали BTshop! 😊",
+            cancellationToken: cancellationToken);
+
+        return;
+    }
+
+
+    // Платна консультація
+    if (messageText == "💼 Платна консультація")
+    {
+        await botClient.SendMessage(
+            chatId,
+            "💼 Платна консультація BTshop\n\n" +
+            "Маєте конкретні запитання щодо Allegro, Empik, e-commerce або розвитку вашого бізнесу?\n\n" +
+            "Ми можемо відповісти на ваші запитання та надати персональну консультацію з урахуванням вашої ситуації.\n\n" +
+            "💰 Вартість консультації — 100 zł.\n\n" +
+            "🏦 Реквізити для оплати:\n\n" +
+            "Отримувач: BTshop\n" +
+            "IBAN: PL72160014621719130410000001\n" +
+            "Призначення платежу: usługi dodatkowe\n\n" +
+            "⚠️ Важливо:\n" +
+            "• Оплата має бути здійснена миттєвим переказом.\n" +
+            "• Після оплати обов'язково надішліть підтвердження платежу ✅\n" +
+            "• Лише після отримання підтвердження ми зможемо узгодити та повідомити вам дату й час консультації.\n\n" +
+            "Дякуємо за розуміння! 🤝",
             replyMarkup: new InlineKeyboardMarkup(
                 InlineKeyboardButton.WithUrl(
                     "💬 Написати Дмитру",
                     "https://t.me/dmytro_bazeniuk")),
+            cancellationToken: cancellationToken);
+
+        return;
+    }
+
+    // Повернення до головного меню
+    if (messageText == "⬅️ Назад до меню")
+    {
+        // Скасовуємо незавершену анкету
+        clientForms.TryRemove(chatId, out _);
+
+        await botClient.SendMessage(
+            chatId,
+            "🏠 Ви повернулися до головного меню.",
+            replyMarkup: new ReplyKeyboardMarkup(new[]
+            {
+            new KeyboardButton[] { "📝 Залишити заявку" },
+            new KeyboardButton[] { "❓ Допомога" }
+            })
+            {
+                ResizeKeyboard = true,
+                IsPersistent = true
+            },
             cancellationToken: cancellationToken);
 
         return;
@@ -181,6 +295,9 @@ async Task HandleUpdateAsync(
                 new[]
                 {
                     new KeyboardButton[] { "➕ Додати клієнта" },
+                    new KeyboardButton[] { "🚫 Заблокувати користувача" },
+                    new KeyboardButton[] { "🔓 Розблокувати користувача" },
+                    new KeyboardButton[] { "📋 Заблоковані користувачі" },
                     new KeyboardButton[] { "❌ Закрити адмін-панель" }
                 })
                 {
@@ -220,6 +337,114 @@ async Task HandleUpdateAsync(
 
         return;
     }
+
+    if (messageText == "🚫 Заблокувати користувача")
+    {
+        if (message.From?.Id != AdminTelegramId)
+            return;
+
+        adminModerationActions[chatId] = "ban";
+
+        await botClient.SendMessage(
+            chatId,
+            "🚫 Введи Telegram ID користувача, якого потрібно заблокувати.",
+            cancellationToken: cancellationToken);
+
+        return;
+    }
+
+    if (messageText == "🔓 Розблокувати користувача")
+    {
+        if (message.From?.Id != AdminTelegramId)
+            return;
+
+        adminModerationActions[chatId] = "unban";
+
+        await botClient.SendMessage(
+            chatId,
+            "🔓 Введи Telegram ID користувача, якого потрібно розблокувати.",
+            cancellationToken: cancellationToken);
+
+        return;
+    }
+
+    if (messageText == "📋 Заблоковані користувачі")
+    {
+        if (message.From?.Id != AdminTelegramId)
+            return;
+
+        var blockedUsers =
+            await blockedUsersService.GetBlockedUsersAsync(cancellationToken);
+
+        string result = blockedUsers.Count == 0
+            ? "Список заблокованих користувачів порожній."
+            : "🚫 Заблоковані користувачі:\n\n" +
+              string.Join("\n", blockedUsers.Select(id => $"• {id}"));
+
+        await botClient.SendMessage(
+            chatId,
+            result,
+            cancellationToken: cancellationToken);
+
+        return;
+    }
+
+    if (adminModerationActions.TryGetValue(chatId, out string? moderationAction))
+    {
+        if (message.From?.Id != AdminTelegramId)
+            return;
+
+        if (!long.TryParse(messageText, out long targetUserId) ||
+            targetUserId <= 0)
+        {
+            await botClient.SendMessage(
+                chatId,
+                "❌ Некоректний Telegram ID. Введи числовий ID.",
+                cancellationToken: cancellationToken);
+
+            return;
+        }
+
+        if (targetUserId == AdminTelegramId)
+        {
+            await botClient.SendMessage(
+                chatId,
+                "⛔ Не можна заблокувати адміністратора.",
+                cancellationToken: cancellationToken);
+
+            adminModerationActions.TryRemove(chatId, out _);
+            return;
+        }
+
+        if (moderationAction == "ban")
+        {
+            await blockedUsersService.BlockAsync(
+                targetUserId,
+                cancellationToken);
+
+            await botClient.SendMessage(
+                chatId,
+                $"🚫 Користувача {targetUserId} заблоковано.",
+                cancellationToken: cancellationToken);
+        }
+        else if (moderationAction == "unban")
+        {
+            bool wasBlocked = await blockedUsersService.UnblockAsync(
+                targetUserId,
+                cancellationToken);
+
+            await botClient.SendMessage(
+                chatId,
+                wasBlocked
+                    ? $"✅ Користувача {targetUserId} розблоковано."
+                    : $"ℹ️ Користувача {targetUserId} немає у списку заблокованих.",
+                cancellationToken: cancellationToken);
+        }
+
+        adminModerationActions.TryRemove(chatId, out _);
+        return;
+    }
+
     if (messageText == "➕ Додати клієнта")
     {
         if (message.From?.Id != AdminTelegramId)
@@ -552,7 +777,6 @@ async Task HandleUpdateAsync(
 
     if (message.Contact is { } contact)
     {
-        // Приймаємо лише власний контакт користувача.
         if (contact.UserId != message.From?.Id)
         {
             await botClient.SendMessage(
@@ -565,8 +789,6 @@ async Task HandleUpdateAsync(
 
         if (currentForm.Step == FormStep.Telegram)
         {
-            // На цьому кроці зберігаємо лише Telegram username.
-            // Номер телефону запитаємо окремо.
             currentForm.Telegram = message.From?.Username is { } username
                 ? $"@{username}"
                 : "";
@@ -604,6 +826,40 @@ async Task HandleUpdateAsync(
         return;
 
     string answer = messageText;
+
+    if (currentForm.Step == FormStep.Phone)
+    {
+        string phone = answer.Trim();
+
+        bool validFormat =
+            System.Text.RegularExpressions.Regex.IsMatch(
+                phone,
+                @"^\+?[0-9\s().-]+$");
+
+        int digitCount = phone.Count(char.IsDigit);
+
+        if (!validFormat || digitCount < 9 || digitCount > 15)
+        {
+            await botClient.SendMessage(
+                chatId,
+                "❌ Некоректний номер телефону.\n\n" +
+                "Введи номер із 9–15 цифр.\n" +
+                "Наприклад: +48 123 456 789",
+                cancellationToken: cancellationToken);
+
+            return;
+        }
+
+        currentForm.Phone = phone;
+
+        await AdvanceFormAsync(
+            botClient,
+            chatId,
+            currentForm,
+            cancellationToken);
+
+        return;
+    }
 
     if (currentForm.Step == FormStep.Email)
     {
@@ -675,10 +931,24 @@ async Task HandleUpdateAsync(
 
 
     if (answer == "/skip")
-    {
+    { 
+        if (currentForm.Step is FormStep.Phone or FormStep.Email)
+        {
+            await botClient.SendMessage(
+                chatId,
+                currentForm.Step == FormStep.Phone
+                    ? "📱 Номер телефону обов'язковий. Будь ласка, введи його або поділися контактом."
+                    : "📧 Електронна пошта обов'язкова. Будь ласка, введи свою email-адресу.",
+                cancellationToken: cancellationToken);
+
+            return;
+        }
+
         if (currentForm.EditingField.HasValue)
         {
-            SetField(currentForm, currentForm.EditingField.Value, "");
+            FormStep field = currentForm.EditingField.Value;
+
+            SetField(currentForm, field, "");
             currentForm.EditingField = null;
             currentForm.Step = FormStep.Completed;
 
@@ -686,8 +956,7 @@ async Task HandleUpdateAsync(
                 botClient,
                 chatId,
                 currentForm,
-                cancellationToken
-            );
+                cancellationToken);
 
             return;
         }
@@ -695,12 +964,12 @@ async Task HandleUpdateAsync(
         if (currentForm.Step != FormStep.Completed)
         {
             SetField(currentForm, currentForm.Step, "");
+
             await AdvanceFormAsync(
                 botClient,
                 chatId,
                 currentForm,
-                cancellationToken
-            );
+                cancellationToken);
         }
 
         return;
@@ -807,7 +1076,6 @@ async Task HandleUpdateAsync(
                 Console.WriteLine("DEBUG: User confirmed the application.");
                 Console.WriteLine("DEBUG: Sending application to Google Sheets...");
 
-                // 1. Зберігаємо заявку ОДИН раз
                 await googleSheetsService.AppendApplicationAsync(
                     currentForm.Name,
                     currentForm.Company,
@@ -824,7 +1092,6 @@ async Task HandleUpdateAsync(
 
                 Console.WriteLine("DEBUG: Application successfully saved to Google Sheets.");
 
-                // 2. Лист клієнту
                 if (brevoEmailService is not null &&
                     !string.IsNullOrWhiteSpace(currentForm.Email))
                 {
@@ -851,7 +1118,7 @@ async Task HandleUpdateAsync(
                     try
                     {
                         await brevoEmailService.SendEmailAsync(
-                            "artvorozhbyt@gmail.com",
+                            "btshop.poland@gmail.com",
                             "🔔 Нова заявка — BT SHOP",
                             BrevoEmailService.GetAdminNotificationHtml(
                                 name: currentForm.Name,
